@@ -219,3 +219,6 @@ __marimo__/
 trajectory.json
 trajectory_*.json
 test_results.json
+agent_state.db
+agent_state.db-wal
+agent_state.db-shm

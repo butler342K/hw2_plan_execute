@@ -14,11 +14,17 @@ LLM-ланка (replanner) вирішує, що робити далі:
 """
 
 import operator
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
 from typing import Annotated, List, Literal, Optional, Tuple, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents import create_agent
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field, field_validator
 
@@ -224,32 +230,125 @@ graph.add_conditional_edges('executor', after_executor, {'replanner': 'replanner
 graph.add_conditional_edges('replanner', after_replanner, {'executor': 'executor', 'respond': 'respond'})
 graph.add_edge('respond', END)
 
-app = graph.compile()
+# ── Checkpointer ─────────────────────────────────────────────────
+# SqliteSaver зберігає повний стан графа (план, виконані кроки, guard,
+# logger, ...) на диск після кожного вузла. Це дає durable execution:
+# якщо процес зупиниться (аварійно чи навмисно) посеред плану, стан не
+# втрачається — новий процес може підключитись до того самого файлу
+# й продовжити виконання з останнього checkpoint-у за тим самим
+# thread_id (`app.invoke(None, config)`).
+CHECKPOINT_DB = Path(__file__).parent / 'agent_state.db'
+_conn = sqlite3.connect(str(CHECKPOINT_DB), check_same_thread=False)
+# Явний allowlist для guard/logger (dataclass-и, що не входять у стандартний
+# набір JSON-типів) — без нього серіалізатор дозволяє їх лише в
+# "permissive"-режимі з попередженням про майбутню заборону.
+_serde = JsonPlusSerializer(allowed_msgpack_modules=[
+    ('safety', 'RunGuard'),
+    ('safety', 'LoopDetector'),
+    ('logger', 'TrajectoryLogger'),
+])
+checkpointer = SqliteSaver(_conn, serde=_serde)
 
-# ── Запуск ───────────────────────────────────────────────────────
-if __name__ == '__main__':
-    guard = RunGuard()
-    traj_logger = TrajectoryLogger()
+app = graph.compile(checkpointer=checkpointer)
 
-    query = 'Перевір статус замовлення У-0387776 в базі і заодно відстеж посилку — чи збігається інформація?'
-    result = app.invoke({
+# ── Демонстрація durable execution через checkpointer ────────────
+DEFAULT_QUERY = 'Перевір статус замовлення У-0387776 в базі і заодно відстеж посилку — чи збігається інформація?'
+
+
+def _initial_state(query: str) -> dict:
+    return {
         'input': query,
         'plan': [],
         'past_steps': [],
         'response': None,
         'final_response': None,
         'step_count': 0,
-        'guard': guard,
-        'logger': traj_logger,
-    })
+        'guard': RunGuard(),
+        'logger': TrajectoryLogger(),
+    }
 
-    traj_logger.save('trajectory_plan_execute.json')
 
+def _print_progress(state: dict) -> None:
+    print(f"Кроків виконано: {state.get('step_count', 0)}")
+    print('Залишок плану:')
+    print(_format_plan(state.get('plan', [])))
+    print('Уже виконані кроки:')
+    print(_format_past_steps(state.get('past_steps', [])))
+
+
+def _print_final(result: dict) -> None:
     final: SupportResponse = result['final_response']
-    print('Past steps:')
-    for step, step_result in result['past_steps']:
-        print(f'  - {step} → {str(step_result)[:120]}')
     print('\nStructured response:')
     print(final.model_dump_json(indent=2, exclude_none=True))
-    print(f"Steps executed: {result['step_count']}")
+    print(f"Усього кроків: {result['step_count']}")
+
+
+def run_full(query: str = DEFAULT_QUERY) -> None:
+    """Один процес виконує весь план від початку до кінця без переривань."""
+    thread_id = str(uuid.uuid4())
+    config = {'configurable': {'thread_id': thread_id}}
+    print(f'== Повний прогін в одному процесі (thread_id={thread_id}) ==')
+    result = app.invoke(_initial_state(query), config)
+    result['logger'].save('trajectory_plan_execute.json')
+    _print_final(result)
     print('Trajectory saved: trajectory_plan_execute.json')
+
+
+def run_start(query: str = DEFAULT_QUERY) -> None:
+    """Почати новий thread і навмисно зупинитись одразу після першого
+    виконаного кроку плану — симуляція зупинки/збою процесу посеред плану.
+
+    `interrupt_after=['executor']` зупиняє граф одразу після вузла
+    executor, ще до replanner-а — checkpointer уже встиг записати стан
+    (план, past_steps, step_count) на диск у `agent_state.db`.
+    """
+    thread_id = str(uuid.uuid4())
+    config = {'configurable': {'thread_id': thread_id}}
+    print(f'== СТАРТ: новий thread_id={thread_id} ==')
+    result = app.invoke(_initial_state(query), config, interrupt_after=['executor'])
+    print('\n⏸ Процес зупинено (симуляція збою) одразу після 1 кроку плану:')
+    _print_progress(result)
+    print(f'\nСтан збережено в {CHECKPOINT_DB}. Щоб "перезапустити процес" і продовжити:')
+    print(f'  python plan_execute.py resume {thread_id}')
+
+
+def run_resume(thread_id: str) -> None:
+    """Підключитись до того самого SQLite-файлу checkpoint-ів у НОВОМУ
+    процесі й продовжити виконання плану з місця зупинки за thread_id.
+
+    `app.invoke(None, config)` — вхід None означає "не додавай нового
+    input, просто продовж виконання графа з останнього checkpoint-у".
+    """
+    config = {'configurable': {'thread_id': thread_id}}
+    snapshot = app.get_state(config)
+    if not snapshot.values:
+        print(f'thread_id={thread_id} не знайдено в {CHECKPOINT_DB}.')
+        sys.exit(1)
+
+    print(f'== ВІДНОВЛЕННЯ в новому процесі (thread_id={thread_id}) ==')
+    print('Стан, відновлений з checkpoint (до продовження):')
+    _print_progress(snapshot.values)
+
+    result = app.invoke(None, config)
+
+    print('\n▶ Виконання завершено після відновлення:')
+    _print_final(result)
+
+
+# ── Запуск ───────────────────────────────────────────────────────
+if __name__ == '__main__':
+    args = sys.argv[1:]
+    if not args:
+        run_full()
+    elif args[0] == 'start':
+        run_start()
+    elif args[0] == 'resume' and len(args) == 2:
+        run_resume(args[1])
+    else:
+        print(
+            'Використання:\n'
+            '  python plan_execute.py                      # повний прогін в одному процесі\n'
+            '  python plan_execute.py start                # почати план і зупинитись посередині\n'
+            '  python plan_execute.py resume <thread_id>    # продовжити в новому процесі з checkpoint-у'
+        )
+        sys.exit(1)

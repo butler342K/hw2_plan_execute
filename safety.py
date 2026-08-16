@@ -2,6 +2,7 @@
 
 import json
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 MAX_STEPS = 10
@@ -9,12 +10,12 @@ TIMEOUT_SECONDS = 60
 MAX_REPEATS = 3
 
 
+@dataclass
 class LoopDetector:
     """Виявляє зациклення: N однакових поспіль викликів tool з тими самими аргументами."""
 
-    def __init__(self, max_repeats: int = MAX_REPEATS):
-        self.max_repeats = max_repeats
-        self.recent_calls: List[Tuple[str, str]] = []
+    max_repeats: int = MAX_REPEATS
+    recent_calls: List[Tuple[str, str]] = field(default_factory=list)
 
     def check(self, tool_name: str, args: Dict[str, Any]) -> bool:
         """Зареєструвати виклик tool і перевірити, чи останні max_repeats викликів однакові."""
@@ -24,23 +25,22 @@ class LoopDetector:
         return len(last_n) == self.max_repeats and len(set(last_n)) == 1
 
 
+@dataclass
 class RunGuard:
     """Об'єднує max_steps, timeout і LoopDetector для одного запуску агента.
 
     Живе в AgentState (не через reducer — просто передається як об'єкт),
-    тому створюється заново на кожен app.invoke() і не протікає між запусками.
+    тому створюється заново на кожен app.invoke() і не протікає між запусками
+    (окрім plan_execute.py, де стан — разом з guard-ом — переживає паузу
+    завдяки checkpointer-у; саме тому це dataclass, а не довільний клас:
+    JsonPlusSerializer у SqliteSaver вміє серіалізувати dataclass-и "з
+    коробки", довільні класи — ні).
     """
 
-    def __init__(
-        self,
-        max_steps: int = MAX_STEPS,
-        timeout_seconds: float = TIMEOUT_SECONDS,
-        max_repeats: int = MAX_REPEATS,
-    ):
-        self.max_steps = max_steps
-        self.timeout_seconds = timeout_seconds
-        self.loop_detector = LoopDetector(max_repeats=max_repeats)
-        self.start_time = time.monotonic()
+    max_steps: int = MAX_STEPS
+    timeout_seconds: float = TIMEOUT_SECONDS
+    loop_detector: LoopDetector = field(default_factory=LoopDetector)
+    start_time: float = field(default_factory=time.monotonic)
 
     def check_step_limit(self, step: int) -> Optional[str]:
         if step >= self.max_steps:
