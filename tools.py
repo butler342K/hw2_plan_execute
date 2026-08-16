@@ -55,6 +55,7 @@ def _load_orders() -> list[dict]:
                 'status': row[3].strip(),
                 'ship_date': row[4].split(' ')[0].strip(),
                 'amount': row[5].strip(),
+                'ttn': row[6].strip(),
                 'customer_name': row[9].strip(),
                 'customer_phone': row[10].strip(),
             })
@@ -75,14 +76,15 @@ def _find_orders(query: str) -> list[dict]:
 def search_order(query: str) -> str:
     """Знайти замовлення в базі за номером або телефоном клієнта.
 
-    Використовуйте цей інструмент, коли потрібно дізнатися
-    статус замовлення чи дату відправки.
+    Використовуйте цей інструмент, коли потрібно дізнатися статус
+    замовлення, дату відправки чи номер ТТН/ШКІ для подальшого
+    відстеження посилки через track_parcel / track_ukrposhta_parcel.
 
     Args:
         query: Номер замовлення (повністю або частково) або телефон клієнта.
 
     Returns:
-        Рядок зі статусом і датою відправки знайдених замовлень.
+        Рядок зі статусом, датою відправки і ТТН (якщо є) знайдених замовлень.
     """
     matches = _find_orders(query)
     if not matches:
@@ -90,7 +92,8 @@ def search_order(query: str) -> str:
 
     lines = [
         f'{o["order_number"]} — статус: {STATUS_LABELS.get(o["status"], o["status"])}, '
-        f'дата відправки: {o["ship_date"]}, клієнт: {o["customer_name"]}'
+        f'дата відправки: {o["ship_date"]}, '
+        f'ТТН: {o["ttn"] or "немає"}, клієнт: {o["customer_name"]}'
         for o in matches[:5]
     ]
     if len(matches) > 5:
