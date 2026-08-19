@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, SecretStr
 
+from knowledge import search_knowledge
 from logger import TrajectoryLogger
 from safety import RunGuard
 from tools import get_order_ship_date, search_order, track_parcel, track_ukrposhta_parcel
@@ -18,9 +19,15 @@ load_dotenv()
 
 SYSTEM_PROMPT = (
     'Ти — асистент служби підтримки інтернет-магазину. '
-    'Допомагаєш клієнтам дізнатись статус замовлення чи посилки (Нова Пошта / Укрпошта). '
+    'Допомагаєш клієнтам дізнатись статус замовлення чи посилки (Нова Пошта / Укрпошта), '
+    'а також відповідаєш на загальні питання про доставку, оплату, повернення товару '
+    'та інші правила магазину. '
     'Використовуй доступні tools, щоб знайти реальні дані — ніколи не вигадуй '
-    'статус, дату чи номер, якого немає в результаті виклику tool.'
+    'статус, дату чи номер, якого немає в результаті виклику tool. '
+    'Для конкретного замовлення чи посилки клієнта користуйся search_order, '
+    'get_order_ship_date, track_parcel або track_ukrposhta_parcel. '
+    'Для загальних довідкових питань (правила, умови, причини затримок, повернення тощо) '
+    'користуйся search_knowledge. Сам вирішуй, який tool (або кілька) потрібен для запиту.'
 )
 
 # ── Structured output ────────────────────────────────────────────
@@ -64,7 +71,7 @@ else:
         temperature=0.1,
     )
 
-tools = [search_order, get_order_ship_date, track_parcel, track_ukrposhta_parcel]
+tools = [search_order, get_order_ship_date, track_parcel, track_ukrposhta_parcel, search_knowledge]
 llm_with_tools = llm.bind_tools(tools)
 # method='function_calling': ця модель через zen-проксі ненадійно віддає
 # строгий 'json_schema' response_format, натомість добре працює tool-calling.

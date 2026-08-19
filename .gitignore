@@ -222,3 +222,7 @@ test_results.json
 agent_state.db
 agent_state.db-wal
 agent_state.db-shm
+hitl_state.db
+hitl_state.db-wal
+hitl_state.db-shm
+chroma_db/
