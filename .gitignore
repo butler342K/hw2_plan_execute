@@ -226,3 +226,6 @@ hitl_state.db
 hitl_state.db-wal
 hitl_state.db-shm
 chroma_db/
+
+data/
+*.csv
